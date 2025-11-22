@@ -1,0 +1,155 @@
+---
+title: "Australian Wines Forecasting Dashboard"
+author: "Niyat Kahsay"
+format:
+  html: default
+runtime: shiny
+---
+
+
+```{r}
+#| message: false
+library(tidyverse)
+library(fpp3)
+library(gt)
+```
+
+
+Data Preparation
+```{r}
+# Load data using your structure
+wines_raw <- readr::read_csv("AustralianWines.csv", show_col_types = FALSE)
+
+wine_long <- wines_raw |>
+  pivot_longer(-Month, names_to = "Varietal", values_to = "value") |>
+  mutate(
+    Month = yearmonth(Month),      # yearmonth index
+    Date  = as_date(Month)         # first-of-month Date for UI
+  ) |>
+  as_tsibble(index = Month, key = Varietal)
+```
+
+Data Overview
+```{r}
+#data overview 
+wine_long |>
+  autoplot(value) +
+  facet_wrap(~ Varietal, scales = "free_y") +
+  labs(title = "Australian Wine Sales by Varietal") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Model Fitting for All Varietals
+```{r}
+# safe load / guard
+if (!file.exists("AustralianWines.csv")) stop("AustralianWines.csv missing in project root")
+
+# split data
+train <- wine_long |> filter(Month <= yearmonth("1993 Dec"))
+test  <- wine_long |> filter(Month >  yearmonth("1993 Dec"))
+
+# reuse saved fits if present to speed up preview
+if (file.exists("fit_all.rds")) {
+  fit <- readRDS("fit_all.rds")
+} else {
+  message("Fitting models for all varietals (this may take a few minutes)...")
+  fit <- train |>
+    model(
+      tslm  = TSLM(value ~ trend() + season()),
+      ets   = ETS(value),
+      arima = ARIMA(value)
+    )
+  saveRDS(fit, "fit_all.rds")
+}
+```
+
+Training Accuracy
+```{r}
+fit |>
+  accuracy() |>
+  select(Varietal, .model, RMSE, MAE, MAPE) |>
+  arrange(Varietal, MAPE) |>
+  gt() |>
+  fmt_number(decimals = 1) |>
+  tab_header(title = "Training Accuracy Metrics")
+```
+
+Test Accuracy
+```{r}
+fc <- fit |> forecast(h = 12)
+
+fc |>
+  accuracy(test) |>
+  select(Varietal, .model, RMSE, MAE, MAPE) |>
+  arrange(Varietal, MAPE) |>
+  gt() |>
+  fmt_number(decimals = 1) |>
+  tab_header(title = "Test Accuracy Metrics")
+```
+
+Best Model by Varietal
+```{r}
+# Find best model for each varietal based on MAPE
+best_models <- fc |>
+  accuracy(test) |>
+  group_by(Varietal) |>
+  slice_min(MAPE, n = 1) |>
+  select(Varietal, .model, RMSE, MAE, MAPE)
+
+best_models |>
+  gt() |>
+  fmt_number(decimals = 1) |>
+  tab_header(title = "Best Models by Varietal (Lowest MAPE)")
+```
+
+Forecast Visualization
+
+```{r}
+# Plot forecasts for all varietals
+fc |>
+  autoplot(train, level = 80) +
+  facet_wrap(~ Varietal, scales = "free_y") +
+  labs(title = "12-Month Forecasts for Australian Wines") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Individual Varietal Analysis
+```{r}
+# Example: Detailed analysis for Fortified wine
+if ("Fortified" %in% unique(train$Varietal) && nrow(train |> filter(Varietal == "Fortified")) >= 12) {
+  fortified_fit <- train |>
+    filter(Varietal == "Fortified") |>
+    model(
+      tslm = TSLM(value ~ trend() + season()),
+      ets = ETS(value),
+      arima = ARIMA(value)
+    )
+
+  # Training accuracy
+  fortified_fit |>
+    accuracy() |>
+    select(.model, RMSE, MAE, MAPE) |>
+    arrange(MAPE) |>
+    gt() |>
+    fmt_number(decimals = 1) |>
+    tab_header(title = "Fortified Wine - Training Accuracy")
+
+  # Test accuracy
+  fortified_fc <- fortified_fit |> forecast(h = 12)
+
+  fortified_fc |>
+    accuracy(test |> filter(Varietal == "Fortified")) |>
+    select(.model, RMSE, MAE, MAPE) |>
+    arrange(MAPE) |>
+    gt() |>
+    fmt_number(decimals = 1) |>
+    tab_header(title = "Fortified Wine - Test Accuracy")
+
+  # Forecast plot
+  fortified_fc |>
+    autoplot(train |> filter(Varietal == "Fortified")) +
+    labs(title = "Fortified Wine - 12-Month Forecast")
+} else {
+  message("Fortified data not present or too short in training set — skipping detailed example")
+}
+```
